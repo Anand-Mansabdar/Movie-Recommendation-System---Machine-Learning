@@ -220,3 +220,59 @@ async def attach_tmdb_card_by_title(title: str) -> Optional[TMDBMovieCard]:
         )
     except Exception:
         return None
+    
+    
+@app.on_event("startup")
+def load_pickles():
+    global df, indices_obj, tfidf_matrix, tfidf_obj, TITLE_TO_IDX
+    
+    with open(DF_PATH, "rb") as f:
+        df = pickle.load(f)
+        
+    with open(INDICES_PATH, "rb") as f:
+        indices_obj = pickle.load(f)
+    
+    with open(TFIDF_MATRIX_PATH, "rb") as f:
+        tfidf_matrix =pickle.load(f)
+        
+    with open(TFIDF_PATH, "rb") as f:
+        tfidf_obj = pickle.load(f)
+        
+    TITLE_TO_IDX = build_title_to_idx_map(indices_obj)
+    
+    if df is None or "title" not in df.columns:
+        raise RuntimeError("Your dataframe must contaiin a column with name 'title'...")
+    
+
+# ROUTES
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.get("/home", response_model=List[TMDBMovieCard])
+async def home(category: str = Query("popular"), limit: int = Query(24, ge=1, le=50)):
+    try:
+        if category == "trending":
+            data = await tmdb_get("/trending/movie/day", {"language": "en-US"})
+            return await tmdb_cards_from_results(data.get("results", []), limit=limit)
+    
+        if category not in {"popular", "top_rated", "upcoming", "now_playing"}:
+            raise HTTPException(status_code=400, detail="Invalid category")
+        
+        data = await tmdb_get(f"/movie/{category}", {"language": "en-US", "page": 1})
+        return await tmdb_cards_from_results(data.get("results", []), limit=limit)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Home route crashed: {e}")
+    
+@app.get("/tmdb/search")
+async def search(query: str = Query(..., min_length=1), page: int = Query(1, ge=1, le=10)):
+  return await tmdb_search_movies(query=query, page=page)
+
+
+@app.get("/movie/id/{tmdb_id}", response_model=TMDBMovieDetails)
+async def movie_details(tmdb_id: int):
+    return await tmdb_movie_details(tmdb_id)
+
