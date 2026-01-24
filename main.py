@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 TMDB_BASE = "https://api.themoviedb.org/3"
-TMDB_IMG_500 = "https://image.thdb.org/t/p/w500"
+TMDB_IMG_500 = "https://image.tmdb.org/t/p/w500"
 
 if not TMDB_API_KEY:
     raise RuntimeError("API key missing. Put the key in .env as TMDB_API_KEY=abcde")
@@ -160,7 +160,7 @@ def build_title_to_idx_map(indices: Any) -> Dict[str, int]:
     # Pandas series or similar mapping
     try:
         for k, v in indices.items():
-            title_to_idx[_norm_title(k)(k)] = int(v)
+            title_to_idx[_norm_title(k)] = int(v)
         return title_to_idx
     except Exception:
         raise RuntimeError(
@@ -293,3 +293,76 @@ async def recommend_genre(tmdb_id: int = Query(...), limit: int = Query(18, ge=1
     
     cards = await tmdb_cards_from_results(discover.get("results", []), limit=limit)
     return [c for c in cards if c.tmdb_id != tmdb_id]
+
+@app.get("/recommend/tfidf")
+async def recommend_tfidf(title: str = Query(..., min_length=1), top_n: int = Query(10, ge=1, le=50)):
+    recommend = recommend_titles(title, top_n=top_n)
+    return [{"title": t, "score": s} for t, s in recommend]
+
+@app.get("/movie/search", response_model=SearchBundleResponse)
+async def search_bundle(
+    query: str = Query(..., min_length=1),
+    tfidf_top_n: int = Query(12, ge=1, le=30),
+    genre_limit: int = Query(12, ge=1, le=30),
+):
+    """
+    This endpoint is for when you have a selected movie and want:
+      - movie details
+      - TF-IDF recommendations (local) + posters
+      - Genre recommendations (TMDB) + posters
+
+    NOTE:
+    - It selects the BEST match from TMDB for the given query.
+    - If you want MULTIPLE matches, use /tmdb/search
+    """
+    best = await tmdb_search_first(query)
+    if not best:
+        raise HTTPException(
+            status_code=404, detail=f"No TMDB movie found for query: {query}"
+        )
+
+    tmdb_id = int(best["id"])
+    details = await tmdb_movie_details(tmdb_id)
+
+    # 1) TF-IDF recommendations (never crash endpoint)
+    tfidf_items: List[TFIDFRecommendedItem] = []
+
+    recs: List[Tuple[str, float]] = []
+    try:
+        # try local dataset by TMDB title
+        recs = recommend_titles(details.title, top_n=tfidf_top_n)
+    except Exception:
+        # fallback to user query
+        try:
+            recs = recommend_titles(query, top_n=tfidf_top_n)
+        except Exception:
+            recs = []
+
+    for title, score in recs:
+        card = await attach_tmdb_card_by_title(title)
+        tfidf_items.append(TFIDFRecommendedItem(title=title, score=score, tmdb=card))
+
+    # 2) Genre recommendations (TMDB discover by first genre)
+    genre_recs: List[TMDBMovieCard] = []
+    if details.genres:
+        genre_id = details.genres[0]["id"]
+        discover = await tmdb_get(
+            "/discover/movie",
+            {
+                "with_genres": genre_id,
+                "language": "en-US",
+                "sort_by": "popularity.desc",
+                "page": 1,
+            },
+        )
+        cards = await tmdb_cards_from_results(
+            discover.get("results", []), limit=genre_limit
+        )
+        genre_recs = [c for c in cards if c.tmdb_id != details.tmdb_id]
+
+    return SearchBundleResponse(
+        query=query,
+        movie_details=details,
+        tfidf_recommendations=tfidf_items,
+        genre_recommendations=genre_recs,
+    )
