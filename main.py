@@ -276,3 +276,20 @@ async def search(query: str = Query(..., min_length=1), page: int = Query(1, ge=
 async def movie_details(tmdb_id: int):
     return await tmdb_movie_details(tmdb_id)
 
+
+@app.get("/recommend/genre", response_model=List[TMDBMovieCard])
+async def recommend_genre(tmdb_id: int = Query(...), limit: int = Query(18, ge=1, le=50)):
+    details = tmdb_movie_details(tmdb_id)
+    if not details.genres:
+        return []
+    
+    genre_id = details.genres[0]["id"]
+    discover =  await tmdb_get("/discover/movie", {
+        "with_genres": genre_id,
+        "language": "en-US",
+        "sort-by": "popularity.desc",
+        "page": 1
+    })
+    
+    cards = await tmdb_cards_from_results(discover.get("results", []), limit=limit)
+    return [c for c in cards if c.tmdb_id != tmdb_id]
